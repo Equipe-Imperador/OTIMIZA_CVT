@@ -33,8 +33,8 @@ const float CIRCUM_DIANT = 3.14159f * DIAMETRO_DIANT;
 
 // Parâmetros de Filtro
 const unsigned long TIMEOUT_US = 500000;    
-const unsigned long DEBOUNCE_RPM = 11000;    // Debounce específico para motor
-const unsigned long DEBOUNCE_VEL = 1000; 
+const unsigned long DEBOUNCE_RPM = 11765;    // Debounce específico para motor
+const unsigned long DEBOUNCE_VEL = 1000;
 
 // Estrutura de Dados para a Fila e SD
 struct SpeedPacket {
