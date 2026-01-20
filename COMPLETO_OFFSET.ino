@@ -10,14 +10,14 @@
 #define PIN_RPM          35 // Sensor de RPM (Motor/Eixo 1)
 #define PIN_VEL_TRAS     32 // Sensor de Velocidade Traseira
 #define PIN_VEL_DIANT_E  33
-#define PIN_VEL_DIANT_D  25
+//#define PIN_VEL_DIANT_D  25
 #define SD_CS            5
 
 // --- AJUSTES DE OFFSET (CALIBRAÇÃO) ---
 float OFFSET_RPM     = 1.0f;
 float OFFSET_TRAS    = 1.0f; 
 float OFFSET_DIANT_E = 1.0f;
-float OFFSET_DIANT_D = 1.0f;
+//float OFFSET_DIANT_D = 1.0f;
 
 // --- CONFIGURAÇÃO MECÂNICA ---
 #define DIAMETRO_TRAS    0.54f
@@ -42,7 +42,7 @@ struct SpeedPacket {
   float rpm;
   float vTras;
   float vDiantE;
-  float vDiantD;
+  //float vDiantD;
 };
 
 // Variáveis Globais
@@ -53,7 +53,7 @@ File dataFile;
 volatile unsigned long dtRPM = 0, lastRPM = 0;
 volatile unsigned long dtTras = 0, lastTras = 0;
 volatile unsigned long dtDiantE = 0, lastDiantE = 0;
-volatile unsigned long dtDiantD = 0, lastDiantD = 0;
+//volatile unsigned long dtDiantD = 0, lastDiantD = 0;
 
 // =================================================================
 // ======================== INTERRUPÇÕES ===========================
@@ -80,12 +80,12 @@ void IRAM_ATTR isrDiantE() {
   lastDiantE = agora;
 }
 
-void IRAM_ATTR isrDiantD() {
+/*void IRAM_ATTR isrDiantD() {
   unsigned long agora = micros();
   if (agora - lastDiantD < DEBOUNCE_VEL) return;
   dtDiantD = agora - lastDiantD;
   lastDiantD = agora;
-}
+}*/
 
 // =================================================================
 // ====================== FUNÇÕES DE CÁLCULO =======================
@@ -119,21 +119,21 @@ void TaskSensor(void *pvParameters) {
   for (;;) {
     SpeedPacket packet;
     unsigned long _dtR, _dtT, _dtDE, _dtDD;
-    unsigned long _lastR, _lastT, _lastDE, _lastDD;
+    unsigned long _lastR, _lastT, _lastDE/*, _lastDD*/;
     unsigned long agora_us = micros();
 
     noInterrupts();
     _dtR = dtRPM;      _lastR = lastRPM;
     _dtT = dtTras;     _lastT = lastTras;
     _dtDE = dtDiantE;  _lastDE = lastDiantE;
-    _dtDD = dtDiantD;  _lastDD = lastDiantD;
+   // _dtDD = dtDiantD;  _lastDD = lastDiantD;
     interrupts();
 
     packet.timestamp = millis();
     packet.rpm    = (agora_us - _lastR > TIMEOUT_US) ? 0.0f : calcRPM(_dtR);
     packet.vTras  = (agora_us - _lastT > TIMEOUT_US) ? 0.0f : calcVelTras(_dtT);
     packet.vDiantE = (agora_us - _lastDE > TIMEOUT_US) ? 0.0f : calcVelDiant(_dtDE, OFFSET_DIANT_E);
-    packet.vDiantD = (agora_us - _lastDD > TIMEOUT_US) ? 0.0f : calcVelDiant(_dtDD, OFFSET_DIANT_D);
+    //packet.vDiantD = (agora_us - _lastDD > TIMEOUT_US) ? 0.0f : calcVelDiant(_dtDD, OFFSET_DIANT_D);
 
     xQueueSend(dataQueue, &packet, 0);
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -148,12 +148,13 @@ void TaskSD(void *pvParameters) {
     if (xQueueReceive(dataQueue, &receivedPacket, portMAX_DELAY) == pdPASS) {
       if (dataFile) {
         // Formato: timestamp; RPM; VelTras; VelDiantE; VelDiantD
-        dataFile.printf("%u;%.0f;%.2f;%.2f;%.2f\n", 
+        dataFile.printf("%u;%.0f;%.2f;%.2f\n", 
                         receivedPacket.timestamp, 
                         receivedPacket.rpm,
                         receivedPacket.vTras, 
                         receivedPacket.vDiantE, 
-                        receivedPacket.vDiantD);
+                        //receivedPacket.vDiantD
+          );
         
         if (++counter >= 100) {
           dataFile.flush();
@@ -171,10 +172,10 @@ void TaskSD(void *pvParameters) {
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIN_RPM, INPUT_PULLUP);
-  pinMode(PIN_VEL_TRAS, INPUT_PULLUP);
-  pinMode(PIN_VEL_DIANT_E, INPUT_PULLUP);
-  pinMode(PIN_VEL_DIANT_D, INPUT_PULLUP);
+  pinMode(PIN_RPM, INPUT);
+  pinMode(PIN_VEL_TRAS, INPUT);
+  pinMode(PIN_VEL_DIANT_E, INPUT);
+  //pinMode(PIN_VEL_DIANT_D, INPUT_PULLUP);
 
   if (!SD.begin(SD_CS)) {
     Serial.println("Erro SD!");
@@ -183,13 +184,13 @@ void setup() {
   
   dataFile = SD.open("/telemetria.csv", FILE_WRITE);
   if (dataFile) {
-    dataFile.println("timestamp_ms;rpm;vTras;vDiantE;vDiantD");
+    dataFile.println("timestamp_ms;rpm;vTras;vDiantE");
   }
 
   attachInterrupt(digitalPinToInterrupt(PIN_RPM), isrRPM, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_VEL_TRAS), isrTras, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_VEL_DIANT_E), isrDiantE, FALLING);
-  attachInterrupt(digitalPinToInterrupt(PIN_VEL_DIANT_D), isrDiantD, FALLING);
+  //attachInterrupt(digitalPinToInterrupt(PIN_VEL_DIANT_D), isrDiantD, FALLING);
 
   dataQueue = xQueueCreate(100, sizeof(SpeedPacket));
 
