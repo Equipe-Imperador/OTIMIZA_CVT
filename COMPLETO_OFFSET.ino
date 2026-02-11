@@ -2,35 +2,30 @@
 #include <SPI.h>
 #include <SD.h>
 
-// ========================== CONFIGURAÇÕES ========================
+// ========================== CONFIGURAÇÕES FÍSICAS ========================
 #define PIN_RPM          33
 #define PIN_VEL_TRAS     32 
 #define PIN_VEL_DIANT_E  34
 #define PIN_VEL_DIANT_D  35
 #define SD_CS            5
 
-// --- AJUSTES DE OFFSET ---
-float OFFSET_RPM     = 1.0f;
-float OFFSET_TRAS    = 1.0f; 
-float OFFSET_DIANT_E = 1.0f;
-float OFFSET_DIANT_D = 1.0f;
-
 // --- CONFIGURAÇÃO MECÂNICA ---
-#define DIAMETRO_TRAS    0.54f
-#define DENTES_TRAS      3
+#define DENTES_RPM       1   // Pulsos por volta do motor
+#define DENTES_TRAS      3   // Imãs no disco traseiro
+#define DENTES_DIANT     1   // Imãs nos discos dianteiros
 #define REDUCAO_TRAS     9.0f
-const float CIRCUM_TRAS = 3.14159f * DIAMETRO_TRAS;
-
+#define DIAMETRO_TRAS    0.54f
 #define DIAMETRO_DIANT   0.52f
-#define DENTES_DIANT     1
+
+const float CIRCUM_TRAS  = 3.14159f * DIAMETRO_TRAS;
 const float CIRCUM_DIANT = 3.14159f * DIAMETRO_DIANT;
 
-#define DENTES_RPM       1 
+// --- AJUSTES DE TIMEOUT E DEBOUNCE ---
+const unsigned long DEBOUNCE_RPM = 11000;   // ~5400 RPM Max
+const unsigned long DEBOUNCE_VEL = 2000;    // Filtro para as rodas
+const unsigned long TIMEOUT_US   = 500000;  // 0.5s sem pulso = 0 RPM/Vel
 
-const unsigned long TIMEOUT_US = 500000;    
-const unsigned long DEBOUNCE_RPM = 11765;   
-const unsigned long DEBOUNCE_VEL = 1000;
-
+// ========================== ESTRUTURAS E GLOBAIS =========================
 struct SpeedPacket {
   uint32_t timestamp;
   float rpm;
@@ -41,94 +36,93 @@ struct SpeedPacket {
 
 QueueHandle_t dataQueue;
 File dataFile;
-char fileName[20]; 
 
-// Variáveis de Interrupção
-volatile unsigned long dtRPM = 0, lastRPM = 0;
-volatile unsigned long dtTras = 0, lastTras = 0;
-volatile unsigned long dtDiantE = 0, lastDiantE = 0;
-volatile unsigned long dtDiantD = 0, lastDiantD = 0;
+// Variáveis de Interrupção (Volatile)
+volatile unsigned long v_dtRPM = 0, v_lastRPM = 0;
+volatile unsigned long v_dtTras = 0, v_lastTras = 0;
+volatile unsigned long v_dtDiantE = 0, v_lastDiantE = 0;
+volatile unsigned long v_dtDiantD = 0, v_lastDiantD = 0;
 
-// ======================== INTERRUPÇÕES ===========================
+// ======================== INTERRUPÇÕES (ISR) =============================
 void IRAM_ATTR isrRPM() {
   unsigned long agora = micros();
-  if (agora - lastRPM < DEBOUNCE_RPM) return;
-  dtRPM = agora - lastRPM;
-  lastRPM = agora;
+  unsigned long diff = agora - v_lastRPM;
+  if (diff < DEBOUNCE_RPM) return;
+  v_dtRPM = diff;
+  v_lastRPM = agora;
 }
 
 void IRAM_ATTR isrTras() {
   unsigned long agora = micros();
-  if (agora - lastTras < DEBOUNCE_VEL) return;
-  dtTras = agora - lastTras;
-  lastTras = agora;
+  unsigned long diff = agora - v_lastTras;
+  if (diff < DEBOUNCE_VEL) return;
+  v_dtTras = diff;
+  v_lastTras = agora;
 }
 
 void IRAM_ATTR isrDiantE() {
   unsigned long agora = micros();
-  if (agora - lastDiantE < DEBOUNCE_VEL) return;
-  dtDiantE = agora - lastDiantE;
-  lastDiantE = agora;
+  unsigned long diff = agora - v_lastDiantE;
+  if (diff < DEBOUNCE_VEL) return;
+  v_dtDiantE = diff;
+  v_lastDiantE = agora;
 }
 
 void IRAM_ATTR isrDiantD() {
   unsigned long agora = micros();
-  if (agora - lastDiantD < DEBOUNCE_VEL) return;
-  dtDiantD = agora - lastDiantD;
-  lastDiantD = agora;
+  unsigned long diff = agora - v_lastDiantD;
+  if (diff < DEBOUNCE_VEL) return;
+  v_dtDiantD = diff;
+  v_lastDiantD = agora;
 }
 
-// ====================== FUNÇÕES DE CÁLCULO =======================
-float calcRPM(unsigned long dt) {
-  if (dt == 0) return 0.0f;
-  return (60000000.0f / (dt * DENTES_RPM)) * OFFSET_RPM;
-}
+// ========================== TAREFAS RTOS =================================
 
-float calcVelTras(unsigned long dt) {
-  if (dt == 0) return 0.0f;
-  return ((1000000.0f * CIRCUM_TRAS * 3.6f) / (dt * REDUCAO_TRAS * DENTES_TRAS)) * OFFSET_TRAS;
-}
-
-float calcVelDiant(unsigned long dt, float offset) {
-  if (dt == 0) return 0.0f;
-  return ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dt * DENTES_DIANT)) * offset;
-}
-
-// ========================== TAREFAS RTOS =========================
+// TAREFA 1: Processamento de Sensores (Core 1)
 void TaskSensor(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   for (;;) {
     SpeedPacket packet;
-    unsigned long _dtR, _dtT, _dtDE, _dtDD;
-    unsigned long _lastR, _lastT, _lastDE, _lastDD;
     unsigned long agora_us = micros();
+    unsigned long dR, dT, dDE, dDD;
 
+    // SEÇÃO CRÍTICA: Copia e reseta os valores voláteis
     noInterrupts();
-    _dtR = dtRPM;   _lastR = lastRPM;
-    _dtT = dtTras;  _lastT = lastTras;
-    _dtDE = dtDiantE; _lastDE = lastDiantE;
-    _dtDD = dtDiantD; _lastDD = lastDiantD;
+    dR = (agora_us - v_lastRPM > TIMEOUT_US) ? 0 : v_dtRPM;
+    dT = (agora_us - v_lastTras > TIMEOUT_US) ? 0 : v_dtTras;
+    dDE = (agora_us - v_lastDiantE > TIMEOUT_US) ? 0 : v_dtDiantE;
+    dDD = (agora_us - v_lastDiantD > TIMEOUT_US) ? 0 : v_dtDiantD;
+    
+    // Zera os DTs para garantir que não calcularemos a mesma volta duas vezes
+    v_dtRPM = 0; v_dtTras = 0; v_dtDiantE = 0; v_dtDiantD = 0;
     interrupts();
 
     packet.timestamp = millis();
-    packet.rpm    = (agora_us - _lastR > TIMEOUT_US) ? 0.0f : calcRPM(_dtR);
-    packet.vTras  = (agora_us - _lastT > TIMEOUT_US) ? 0.0f : calcVelTras(_dtT);
-    packet.vDiantE = (agora_us - _lastDE > TIMEOUT_US) ? 0.0f : calcVelDiant(_dtDE, OFFSET_DIANT_E);
-    packet.vDiantD = (agora_us - _lastDD > TIMEOUT_US) ? 0.0f : calcVelDiant(_dtDD, OFFSET_DIANT_D);
+    
+    // Cálculos de RPM e Velocidade (km/h)
+    packet.rpm    = (dR > 0) ? (60000000.0f / (dR * DENTES_RPM)) : 0.0f;
+    packet.vTras  = (dT > 0) ? ((1000000.0f * CIRCUM_TRAS * 3.6f) / (dT * REDUCAO_TRAS * DENTES_TRAS)) : 0.0f;
+    packet.vDiantE = (dDE > 0) ? ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dDE * DENTES_DIANT)) : 0.0f;
+    packet.vDiantD = (dDD > 0) ? ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dDD * DENTES_DIANT)) : 0.0f;
 
     xQueueSend(dataQueue, &packet, 0);
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10)); 
+    
+    // Roda a 50Hz (20ms) - ideal para dinâmica de CVT
+    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20)); 
   }
 }
 
+// TAREFA 2: Gravação no Cartão SD (Core 0)
 void TaskSD(void *pvParameters) {
   SpeedPacket p;
   int counter = 0;
   for (;;) {
     if (xQueueReceive(dataQueue, &p, portMAX_DELAY) == pdPASS) {
       if (dataFile) {
-        dataFile.printf("%u;%.0f;%.2f;%.2f;%.2f\n", p.timestamp, p.rpm, p.vTras, p.vDiantE, p.vDiantD);
-        if (++counter >= 50) {
+        dataFile.printf("%u;%.0f;%.1f;%.1f;%.1f\n", p.timestamp, p.rpm, p.vTras, p.vDiantE, p.vDiantD);
+        
+        // Flush a cada 100 linhas para não estressar o Core 0
+        if (++counter >= 100) {
           dataFile.flush();
           counter = 0;
         }
@@ -137,45 +131,51 @@ void TaskSD(void *pvParameters) {
   }
 }
 
-// ============================ SETUP ==============================
+// ============================ SETUP ======================================
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIN_RPM, INPUT);
-  pinMode(PIN_VEL_TRAS, INPUT);
-  pinMode(PIN_VEL_DIANT_E, INPUT);
-  pinMode(PIN_VEL_DIANT_D, INPUT);
+  // Sensores com Pullup para maior imunidade a ruído
+  pinMode(PIN_RPM, INPUT_PULLUP);
+  pinMode(PIN_VEL_TRAS, INPUT_PULLUP);
+  pinMode(PIN_VEL_DIANT_E, INPUT_PULLUP);
+  pinMode(PIN_VEL_DIANT_D, INPUT_PULLUP);
 
+  // Inicialização do SD
   if (!SD.begin(SD_CS)) {
-    Serial.println("Erro SD!");
+    Serial.println("FALHA NO SD!");
   } else {
+    char name[20];
     int n = 1;
     while (n < 1000) {
-      sprintf(fileName, "/otim_cvt%d.csv", n);
-      if (!SD.exists(fileName)) break; 
+      sprintf(name, "/cvt_log%d.csv", n);
+      if (!SD.exists(name)) break;
       n++;
     }
-
-    dataFile = SD.open(fileName, FILE_WRITE);
+    dataFile = SD.open(name, FILE_WRITE);
     if (dataFile) {
-      dataFile.println("timestamp_ms;rpm;vTras;vDiantE;vDiantD");
-      Serial.print("Gravando em: ");
-      Serial.println(fileName);
+      dataFile.println("time_ms;rpm;vel_tras;vel_diant_e;vel_diant_d");
+      dataFile.flush();
+      Serial.print("Arquivo criado: "); Serial.println(name);
     }
   }
 
+  // Ativação das Interrupções
   attachInterrupt(digitalPinToInterrupt(PIN_RPM), isrRPM, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_VEL_TRAS), isrTras, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_VEL_DIANT_E), isrDiantE, FALLING);
   attachInterrupt(digitalPinToInterrupt(PIN_VEL_DIANT_D), isrDiantD, FALLING);
 
-  dataQueue = xQueueCreate(100, sizeof(SpeedPacket));
-  xTaskCreatePinnedToCore(TaskSensor, "TaskSensor", 4096, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(TaskSD, "TaskSD", 4096, NULL, 2, NULL, 0);
+  // Criação da Fila e Tasks
+  dataQueue = xQueueCreate(200, sizeof(SpeedPacket));
   
-  Serial.println("Sistema Iniciado!");
+  xTaskCreatePinnedToCore(TaskSensor, "Sensor", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TaskSD,     "SD",     8192, NULL, 2, NULL, 0);
+
+  Serial.println("Sistema CVT Imperador Iniciado!");
 }
 
 void loop() {
+  // O loop fica livre. O RTOS gerencia as Tasks.
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
