@@ -14,18 +14,22 @@
 #define DENTES_RPM       1   
 #define DENTES_TRAS      3   
 #define DENTES_DIANT     5   
-#define REDUCAO_TRAS     9.2f
+#define REDUCAO_TRAS     9.0f
 #define DIAMETRO_TRAS    0.54f
 #define DIAMETRO_DIANT   0.52f
 
 const float CIRCUM_TRAS  = 3.14159f * DIAMETRO_TRAS;
 const float CIRCUM_DIANT = 3.14159f * DIAMETRO_DIANT;
 
-// --- AJUSTES DE FILTRO ---
+// --- AJUSTES DE FILTRO (DEBOUNCE) ---
 const unsigned long DEBOUNCE_RPM   = 5000;  
 const unsigned long DEBOUNCE_TRAS  = 3000;  
 const unsigned long DEBOUNCE_DIANT = 5000;  
-const unsigned long TIMEOUT_US     = 1000000; 
+
+// --- AJUSTES DE TIMEOUT INDEPENDENTES (em microssegundos) ---
+const unsigned long TIMEOUT_RPM_US   = 1000000; // 1 segundo
+const unsigned long TIMEOUT_TRAS_US  = 5000000; // Tempo para zerar traseira
+const unsigned long TIMEOUT_DIANT_US = 1200000; // Tempo para zerar dianteira
 
 // ========================== ESTRUTURAS E GLOBAIS =========================
 struct SpeedPacket {
@@ -81,7 +85,6 @@ void IRAM_ATTR isrDiantD() {
 void TaskSensor(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   
-  // Memória estática para o Filtro de Plausibilidade
   static float last_valid_rpm = 0.0f;
   static float last_valid_vTras = 0.0f;
   static float last_valid_vDiantE = 0.0f;
@@ -102,24 +105,23 @@ void TaskSensor(void *pvParameters) {
 
     packet.timestamp = millis();
     
-    // 1. Cálculo Bruto
-    float raw_rpm     = (agora_us - lR > TIMEOUT_US || dR == 0) ? 0.0f : (60000000.0f / (dR * DENTES_RPM));
-    float raw_vTras   = (agora_us - lT > TIMEOUT_US || dT == 0) ? 0.0f : ((1000000.0f * CIRCUM_TRAS * 3.6f) / (dT * REDUCAO_TRAS * DENTES_TRAS));
-    float raw_vDiantE = (agora_us - lDE > TIMEOUT_US || dDE == 0) ? 0.0f : ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dDE * DENTES_DIANT));
-    float raw_vDiantD = (agora_us - lDD > TIMEOUT_US || dDD == 0) ? 0.0f : ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dDD * DENTES_DIANT));
+    // 1. Cálculo Bruto com Timeouts Independentes
+    float raw_rpm     = (agora_us - lR > TIMEOUT_RPM_US || dR == 0) ? 0.0f : (60000000.0f / (dR * DENTES_RPM));
+    float raw_vTras   = (agora_us - lT > TIMEOUT_TRAS_US || dT == 0) ? 0.0f : ((1000000.0f * CIRCUM_TRAS * 3.6f) / (dT * REDUCAO_TRAS * DENTES_TRAS));
+    float raw_vDiantE = (agora_us - lDE > TIMEOUT_DIANT_US || dDE == 0) ? 0.0f : ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dDE * DENTES_DIANT));
+    float raw_vDiantD = (agora_us - lDD > TIMEOUT_DIANT_US || dDD == 0) ? 0.0f : ((1000000.0f * CIRCUM_DIANT * 3.6f) / (dDD * DENTES_DIANT));
 
+    // 2. Filtro de Plausibilidade (mantido conforme original)
     if (raw_rpm > 0 && last_valid_rpm > 0 && fabs(raw_rpm - last_valid_rpm) > 1500.0f) raw_rpm = last_valid_rpm;
     if (raw_vTras > 0 && last_valid_vTras > 0 && fabs(raw_vTras - last_valid_vTras) > 15.0f) raw_vTras = last_valid_vTras;
     if (raw_vDiantE > 0 && last_valid_vDiantE > 0 && fabs(raw_vDiantE - last_valid_vDiantE) > 15.0f) raw_vDiantE = last_valid_vDiantE;
     if (raw_vDiantD > 0 && last_valid_vDiantD > 0 && fabs(raw_vDiantD - last_valid_vDiantD) > 15.0f) raw_vDiantD = last_valid_vDiantD;
 
-    // Atualiza a memória com o dado limpo
     last_valid_rpm = raw_rpm;
     last_valid_vTras = raw_vTras;
     last_valid_vDiantE = raw_vDiantE;
     last_valid_vDiantD = raw_vDiantD;
 
-    // 3. Monta o pacote final
     packet.rpm = raw_rpm;
     packet.vTras = raw_vTras;
     packet.vDiantE = raw_vDiantE;
@@ -149,7 +151,7 @@ void TaskSD(void *pvParameters) {
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIN_RPM, INPUT);
+  pinMode(PIN_RPM, INPUT_PULLUP);
   pinMode(PIN_VEL_TRAS, INPUT_PULLUP);
   pinMode(PIN_VEL_DIANT_E, INPUT);
   pinMode(PIN_VEL_DIANT_D, INPUT);
